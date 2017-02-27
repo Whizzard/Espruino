@@ -101,7 +101,21 @@ void bleCompleteTaskFailAndUnLock(BleTask task, JsVar *data) {
   bleCompleteTask(task, false, data);
   jsvUnLock(data);
 }
+void bleSwitchTask(BleTask task) {
+  bleTask = task;
+}
 
+// ------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------
+#ifdef NRF52
+void bleSetActiveBluetoothGattServer(JsVar *var) {
+  jsvObjectSetChild(execInfo.hiddenRoot, BLE_NAME_GATT_SERVER, var);
+}
+
+JsVar *bleGetActiveBluetoothGattServer() {
+  return jsvObjectGetChild(execInfo.hiddenRoot, BLE_NAME_GATT_SERVER, 0);
+}
+#endif
 // ------------------------------------------------------------------------------
 // ------------------------------------------------------------------------------
 
@@ -215,6 +229,40 @@ Called when an NFC field is detected
   "ifdef" : "NRF52"
 }
 Called when an NFC field is no longer detected
+ */
+/*JSON{
+  "type" : "event",
+  "class" : "BluetoothDevice",
+  "name" : "gattserverdisconnected",
+  "ifdef" : "NRF52"
+}
+Called when the device gets disconnected.
+
+To connect and then print `Disconnected` when the device is
+disconnected, just do the following:
+
+```
+var gatt;
+var t = getTime();
+NRF.connect("aa:bb:cc:dd:ee:ff").then(function(gatt) {
+  gatt.device.on('gattserverdisconnected', function(event) {
+    console.log("Disconnected");
+  });
+});
+```
+ */
+/*JSON{
+  "type" : "event",
+  "class" : "BluetoothRemoteGATTCharacteristic",
+  "name" : "characteristicvaluechanged",
+  "ifdef" : "NRF52"
+}
+Called when a characteristic's value changes, *after* `BluetoothRemoteGATTCharacteristic.startNotifications` has been called.
+See that for an example.
+
+The first argument is of the form `{target : BluetoothRemoteGATTCharacteristic}`
+
+`BluetoothRemoteGATTCharacteristic.value` will then contain the new value.
  */
 
 /*JSON{
@@ -555,7 +603,7 @@ NRF.setScanResponse([0x07,  // Length of Data
 */
 void jswrap_nrf_bluetooth_setScanResponse(JsVar *data) {
   uint32_t err_code;
-  
+
   jsvObjectSetOrRemoveChild(execInfo.hiddenRoot, BLE_NAME_SCAN_RESPONSE_DATA, data);
 
   if (jsvIsArray(data) || jsvIsArrayBuffer(data)) {
@@ -1924,12 +1972,31 @@ NRF.connect(device_address).then(function(d) {
 });
 ```
 
+For example, to listen to the output of another Puck.js's Nordic
+Serial port service, you can use:
+
+```
+var gatt;
+NRF.connect("pu:ck:js:ad:dr:es random").then(function(g) {
+  gatt = g;
+  return gatt.getPrimaryService("6e400001-b5a3-f393-e0a9-e50e24dcca9e");
+}).then(function(service) {
+  return service.getCharacteristic("6e400003-b5a3-f393-e0a9-e50e24dcca9e");
+}).then(function(characteristic) {
+  characteristic.on('characteristicvaluechanged', function(event) {
+    console.log("RX: "+JSON.stringify(event.target.value.buffer));
+  });
+  return characteristic.startNotifications();
+}).then(function() {
+  console.log("Done!");
+});
+```
+
 **Note:** This is only available on some devices
 */
 JsVar *jswrap_nrf_BluetoothRemoteGATTCharacteristic_startNotifications(JsVar *characteristic) {
-#if 0 // CENTRAL_LINK_COUNT>0
-  if (!bleNewTask(BLETASK_CHARACTERISTIC_NOTIFY, 0))
-      return 0;
+#if CENTRAL_LINK_COUNT>0
+  
   // Set our characteristic's handle up in the list of handles to notify for
   // TODO: What happens when we close the connection and re-open another?
   uint16_t handle = (uint16_t)jsvGetIntegerAndUnLock(jsvObjectGetChild(characteristic, "handle_value", 0));
@@ -1938,8 +2005,23 @@ JsVar *jswrap_nrf_BluetoothRemoteGATTCharacteristic_startNotifications(JsVar *ch
     jsvSetArrayItem(handles, handle, characteristic);
     jsvUnLock(handles);
   }
-  JsVar *promise = jsvLockAgainSafe(blePromise);
-  jsble_central_characteristicNotify(characteristic, true);
+  
+  JsVar *promise;
+  
+  // Check for existing cccd_handle 
+  uint16_t cccd = (uint16_t)jsvGetIntegerAndUnLock(jsvObjectGetChild(characteristic,"handle_cccd", 0));
+  if ( !cccd ) {
+    if (!bleNewTask(BLETASK_CHARACTERISTIC_DESC_AND_STARTNOTIFY, characteristic))
+      return 0;
+    promise = jsvLockAgainSafe(blePromise);
+    jsble_central_characteristicDescDiscover(characteristic);
+  }
+  else {
+    if (!bleNewTask(BLETASK_CHARACTERISTIC_NOTIFY, 0))
+      return 0;
+    promise = jsvLockAgainSafe(blePromise);    
+    jsble_central_characteristicNotify(characteristic, true);
+  }
   return promise;
 #else
   jsExceptionHere(JSET_ERROR, "Unimplemented");
@@ -1952,12 +2034,12 @@ JsVar *jswrap_nrf_BluetoothRemoteGATTCharacteristic_startNotifications(JsVar *ch
     "class" : "BluetoothRemoteGATTCharacteristic",
     "name" : "stopNotifications",
     "generate" : "jswrap_nrf_BluetoothRemoteGATTCharacteristic_stopNotifications",
-    "return" : ["JsVar", "A Promise that is resolved (or rejected) with data when notifications have been added" ]
+    "return" : ["JsVar", "A Promise that is resolved (or rejected) with data when notifications have been removed" ]
 }
 **Note:** This is only available on some devices
 */
 JsVar *jswrap_nrf_BluetoothRemoteGATTCharacteristic_stopNotifications(JsVar *characteristic) {
-#if 0 // CENTRAL_LINK_COUNT>0
+#if CENTRAL_LINK_COUNT>0
   // Remove our characteristic handle from the list of handles to notify for
   uint16_t handle = (uint16_t)jsvGetIntegerAndUnLock(jsvObjectGetChild(characteristic, "handle_value", 0));
   JsVar *handles = jsvObjectGetChild(execInfo.hiddenRoot, "bleHdl", JSV_ARRAY);
